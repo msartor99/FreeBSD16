@@ -2,7 +2,7 @@
 # ==============================================================================
 # IDEMPOTENT INSTALLATION AND CONFIGURATION SCRIPT FOR FREEBSD
 # Target: Universal Desktop Deployment (Workstations & Laptops)
-# Version: 16.0-CURRENT (Aquantia AQ107/P620 native, SDDM NASA Theme, POSIX sh)
+# Version: 16.0-CURRENT (Fully Idempotent, Nvidia Fix, SDDM X11, POSIX sh)
 # ==============================================================================
 
 # Check for root privileges
@@ -39,6 +39,12 @@ add_line_if_missing() {
     grep -qF -- "$LINE" "$FILE" || echo "$LINE" >> "$FILE"
 }
 
+# Helper function to append kld module cleanly without duplicating
+add_kld_module() {
+    MOD="$1"
+    sysrc -n kld_list | grep -qw "$MOD" || sysrc kld_list+="$MOD"
+}
+
 # ==============================================================================
 # 1. INTERACTIVE SELECTION MENUS (bsddialog)
 # ==============================================================================
@@ -60,7 +66,7 @@ OS_CHOICE=$(cat "$MENU_OUT")
 # Machine Type (Desktop vs Laptop)
 bsddialog --title "Machine Profile" \
           --menu "Select the type of hardware for power/network optimizations:" 15 70 2 \
-          "1" "Desktop / Workstation (Lenovo P620 / Performance)" \
+          "1" "Desktop / Workstation (Performance focus)" \
           "2" "Laptop / Notebook (Battery, WiFi & Suspend focus)" 2> "$MENU_OUT"
 MACHINE_TYPE=$(cat "$MENU_OUT")
 
@@ -108,12 +114,11 @@ GPU_CHOICE=$(cat "$MENU_OUT")
 NVIDIA_VERSION=""
 if [ "$GPU_CHOICE" -eq 1 ]; then
     bsddialog --title "NVIDIA Driver Version" \
-              --menu "Select the exact NVIDIA driver version for your GPU:" 15 70 3 \
-              "595" "Version 595" \
-              "580" "Version 580" \
-              "470" "Version 470 (Legacy branch)" 2> "$MENU_OUT"
+              --menu "Select the exact NVIDIA driver version branch:" 15 70 2 \
+              "latest" "Latest production driver (nvidia-driver)" \
+              "470"    "Version 470 (Legacy branch)" 2> "$MENU_OUT"
     NVIDIA_VERSION=$(cat "$MENU_OUT")
-    [ -z "$NVIDIA_VERSION" ] && NVIDIA_VERSION="580"
+    [ -z "$NVIDIA_VERSION" ] && NVIDIA_VERSION="latest"
 fi
 
 # Desktop Environment Selection Menu
@@ -171,7 +176,6 @@ clear
 echo "=========================================================================="
 echo "🚀 Updating Package repository..."
 echo "=========================================================================="
-# Sur FreeBSD 16 CURRENT, "latest" est préconisé pour l'alignement ABI
 sed -i '' 's/quarterly/latest/g' /etc/pkg/FreeBSD.conf 2>/dev/null || true
 env ASSUME_ALWAYS_YES=YES pkg bootstrap -f
 pkg update -f
@@ -192,29 +196,23 @@ pw usermod root -L ${CLASS_NAME}
 pw usermod "$MAIN_USER" -L ${CLASS_NAME}
 
 # ==============================================================================
-# 3. SYSTEM OPTIMIZATIONS & NETWORK (Aquantia AQ107 Support)
+# 3. SYSTEM OPTIMIZATIONS
 # ==============================================================================
-echo "⚙️  Optimizing boot loader, kernel parameters & Aquantia driver..."
+echo "⚙️  Optimizing boot loader & kernel parameters..."
 
 sysrc -f /boot/loader.conf boot_mute="YES"
 sysrc splash_changer_enable="YES"
 sysrc rc_startmsgs="NO"
 sysrc -f /boot/loader.conf autoboot_delay="3"
-sysrc -f /boot/loader.conf tmpfs_load="YES"
 sysrc -f /boot/loader.conf aio_load="YES"
-
-# FreeBSD 16.0 Native Aquantia driver (aq0) configuration
-sysrc kld_list+="if_aq"
-sysrc ifconfig_aq0="DHCP"
 
 # Universal Network/TCP optimizations
 add_line_if_missing 'net.inet.tcp.soreceive_stream="1"' /boot/loader.conf
 add_line_if_missing 'net.isr.defaultqlimit="2048"' /boot/loader.conf
 add_line_if_missing 'net.link.ifqmaxlen="2048"' /boot/loader.conf
-sysrc kld_list+="cc_htcp"
+add_kld_module "cc_htcp"
 
 # Sysctl Tweaks
-add_line_if_missing "kern.sched.preempt_thresh=224" /etc/sysctl.conf
 add_line_if_missing "kern.ipc.shm_allow_removed=1" /etc/sysctl.conf
 add_line_if_missing "kern.ipc.shm_use_phys=1" /etc/sysctl.conf
 add_line_if_missing "net.local.stream.recvspace=65536" /etc/sysctl.conf
@@ -223,7 +221,7 @@ add_line_if_missing "vfs.usermount=1" /etc/sysctl.conf
 add_line_if_missing "hw.kbd.keymap_restrict_change=4" /etc/sysctl.conf
 
 # Silence standard rc messages
-if ! grep -q "run_rc_script .\*_rc_elem.*> /dev/null" /etc/rc; then
+if ! grep -q "run_rc_script .*_rc_elem.*> /dev/null" /etc/rc; then
     sed -i '' 's/run_rc_script ${_rc_elem} ${_boot}/run_rc_script ${_rc_elem} ${_boot} > \/dev\/null/g' /etc/rc
 fi
 
@@ -241,7 +239,7 @@ if [ "$MACHINE_TYPE" -eq 2 ]; then
     
     sysrc performance_cx_lowest="Cmax"
     sysrc economy_cx_lowest="Cmax"
-    sysrc kld_list+="acpi_ibm"
+    add_kld_module "acpi_ibm"
     
     mkdir -p /usr/local/etc/sudoers.d
     if [ ! -f /usr/local/etc/sudoers.d/networkmgr ]; then
@@ -329,34 +327,40 @@ add path 'video*' mode 0660 group video
 add path 'backlight/*' mode 0660 group operator
 EOF
 sysrc devfs_system_ruleset="localrules"
-sysrc kld_list+="fusefs ext2fs"
+add_kld_module "fusefs"
+add_kld_module "ext2fs"
 
 # ==============================================================================
 # 8. GRAPHICS & X11
 # ==============================================================================
-echo "🖥️  Installing X.org base and session utilities..."
-pkg install -y xorg xauth xinit xterm
+echo "🖥️  Installing X.org base, utilities, and GPU drivers..."
+pkg install -y xorg xauth xinit xterm xrdb xsetroot xcursor-themes
 
 case "$GPU_CHOICE" in
     1)
-        NV_PKG="nvidia-driver-${NVIDIA_VERSION}"
-        NV_LINUX_PKG="linux-nvidia-libs-${NVIDIA_VERSION}"
+        if [ "$NVIDIA_VERSION" = "470" ]; then
+            NV_PKG="nvidia-driver-470"
+            NV_LINUX_PKG="linux-nvidia-libs-470"
+        else
+            NV_PKG="nvidia-driver"
+            NV_LINUX_PKG="linux-nvidia-libs"
+        fi
         
-        echo "🟢 Installing NVIDIA proprietary driver (Version ${NVIDIA_VERSION})..."
+        echo "🟢 Installing NVIDIA proprietary driver ($NV_PKG)..."
         pkg install -y "$NV_PKG" "$NV_LINUX_PKG" libc6-shim nvidia-settings nvidia-xconfig
         
-        sysrc kld_list+="nvidia-modeset"
+        add_kld_module "nvidia-modeset"
         add_line_if_missing 'hw.nvidiadrm.modeset="1"' /boot/loader.conf
         add_line_if_missing 'hw.nvidia.registry.EnableGpuFirmware="1"' /boot/loader.conf
         [ ! -f /etc/X11/xorg.conf ] && [ ! -f /usr/local/etc/X11/xorg.conf ] && nvidia-xconfig --silent
         ;;
     2)
         pkg install -y drm-kmod wayland xwayland
-        sysrc kld_list+="amdgpu"
+        add_kld_module "amdgpu"
         ;;
     3)
         pkg install -y drm-kmod wayland xwayland
-        sysrc kld_list+="i915kms"
+        add_kld_module "i915kms"
         ;;
     4)
         pkg install -y xf86-video-scfb xf86-video-vmware xf86-video-vesa wayland xwayland
@@ -399,9 +403,9 @@ case "$DE_CHOICE" in
         ;;
 esac
 
-# SDDM Keyboard Fix & UI Flag Sync
+# SDDM Base Configuration (Forcing X11 DisplayServer)
 if [ "$DE_CHOICE" -ne 4 ]; then
-    echo "⌨️  Configuring SDDM keyboard layout..."
+    echo "⌨️  Configuring SDDM keyboard layout & display server..."
     
     mkdir -p /usr/local/share/sddm/scripts
     cat > /usr/local/share/sddm/scripts/Xsetup << EOF
@@ -427,69 +431,79 @@ EOF
     chown -R sddm:sddm /var/db/sddm/.config 2>/dev/null || true
 fi
 
-# NASA Theme Integration
-if [ "$DE_CHOICE" -ne 4 ] && [ "$THEME_NASA" -eq 0 ]; then
-    echo "🎨 Applying custom NASA SDDM theme..."
-    git clone https://github.com/msartor99/FreeBSD14 /tmp/fb14_assets
-    mkdir -p /usr/local/share/sddm/themes/nasa
-    cp /usr/local/share/sddm/themes/maldives/* /usr/local/share/sddm/themes/nasa/ 2>/dev/null || true
-    cp /tmp/fb14_assets/Main.qml /usr/local/share/sddm/themes/nasa/ 2>/dev/null || true
-    cp /tmp/fb14_assets/metadata.desktop /usr/local/share/sddm/themes/nasa/ 2>/dev/null || true
-    
-    rm -f /usr/local/share/sddm/themes/nasa/background.*
-    rm -f /usr/local/share/sddm/themes/nasa/preview.*
-    
-    cp /tmp/fb14_assets/nasa2560login.jpg /usr/local/share/sddm/themes/nasa/background.jpg 2>/dev/null || true
-    cp /tmp/fb14_assets/nasa2560login.jpg /usr/local/share/sddm/themes/nasa/preview.png 2>/dev/null || true
-    cp /tmp/fb14_assets/nasa2560login.jpg /usr/local/share/sddm/themes/nasa/preview.jpg 2>/dev/null || true
-    
-    if grep -q "^Preview=" /usr/local/share/sddm/themes/nasa/metadata.desktop 2>/dev/null; then
-        sed -i '' 's/^Preview=.*/Preview=preview.png/' /usr/local/share/sddm/themes/nasa/metadata.desktop
-    else
-        echo "Preview=preview.png" >> /usr/local/share/sddm/themes/nasa/metadata.desktop
-    fi
+# SDDM Theme Setup
+if [ "$DE_CHOICE" -ne 4 ]; then
+    THEME_NAME="breeze"
+    if [ "$THEME_NASA" -eq 0 ]; then
+        echo "🎨 Applying custom NASA SDDM theme..."
+        rm -rf /tmp/fb14_assets
+        git clone https://github.com/msartor99/FreeBSD14 /tmp/fb14_assets
+        mkdir -p /usr/local/share/sddm/themes/nasa
+        cp /usr/local/share/sddm/themes/maldives/* /usr/local/share/sddm/themes/nasa/ 2>/dev/null || true
+        cp /tmp/fb14_assets/Main.qml /usr/local/share/sddm/themes/nasa/ 2>/dev/null || true
+        cp /tmp/fb14_assets/metadata.desktop /usr/local/share/sddm/themes/nasa/ 2>/dev/null || true
+        
+        rm -f /usr/local/share/sddm/themes/nasa/background.*
+        rm -f /usr/local/share/sddm/themes/nasa/preview.*
+        
+        cp /tmp/fb14_assets/nasa2560login.jpg /usr/local/share/sddm/themes/nasa/background.jpg 2>/dev/null || true
+        cp /tmp/fb14_assets/nasa2560login.jpg /usr/local/share/sddm/themes/nasa/preview.png 2>/dev/null || true
+        cp /tmp/fb14_assets/nasa2560login.jpg /usr/local/share/sddm/themes/nasa/preview.jpg 2>/dev/null || true
+        
+        if grep -q "^Preview=" /usr/local/share/sddm/themes/nasa/metadata.desktop 2>/dev/null; then
+            sed -i '' 's/^Preview=.*/Preview=preview.png/' /usr/local/share/sddm/themes/nasa/metadata.desktop
+        else
+            echo "Preview=preview.png" >> /usr/local/share/sddm/themes/nasa/metadata.desktop
+        fi
 
-    if [ -f /usr/local/share/sddm/themes/nasa/theme.conf ]; then
-        sed -i '' 's/^background=.*/background=background.jpg/' /usr/local/share/sddm/themes/nasa/theme.conf
-    fi
+        if [ -f /usr/local/share/sddm/themes/nasa/theme.conf ]; then
+            sed -i '' 's/^background=.*/background=background.jpg/' /usr/local/share/sddm/themes/nasa/theme.conf
+        fi
 
-    cat > /usr/local/etc/sddm.conf << EOF
-[Theme]
-Current=nasa
-EOF
-    mkdir -p /boot/images
-    cp -r /tmp/fb14_assets/freebsd-brand-rev.png /boot/images/ 2>/dev/null || true
-    cp -r /tmp/fb14_assets/freebsd-logo-rev.png  /boot/images/ 2>/dev/null || true
-    cp -r /tmp/fb14_assets/nasa1920.png /boot/images/splash.png 2>/dev/null || true
-    sysrc -f /boot/loader.conf splash="/boot/images/splash.png"
-    
-    fetch -o /tmp/fb14_assets/nasa_4k_wallpaper.jpg https://raw.githubusercontent.com/msartor99/FreeBSD14/ffdccbb160df14397836ce9b3b361c9ab87f97a9/wp8860763-nasa-4k-wallpapers.jpg 2>/dev/null || true
-    
-    if [ -f /tmp/fb14_assets/nasa_4k_wallpaper.jpg ]; then
-        if [ "$DE_CHOICE" -eq 1 ]; then
-            mkdir -p /usr/local/share/wallpapers/NASA_4K/contents/images
-            cp /tmp/fb14_assets/nasa_4k_wallpaper.jpg /usr/local/share/wallpapers/NASA_4K/contents/images/3840x2160.jpg
-            cat > /usr/local/share/wallpapers/NASA_4K/metadata.desktop << 'EOF_KDE'
+        mkdir -p /boot/images
+        cp -r /tmp/fb14_assets/freebsd-brand-rev.png /boot/images/ 2>/dev/null || true
+        cp -r /tmp/fb14_assets/freebsd-logo-rev.png  /boot/images/ 2>/dev/null || true
+        cp -r /tmp/fb14_assets/nasa1920.png /boot/images/splash.png 2>/dev/null || true
+        sysrc -f /boot/loader.conf splash="/boot/images/splash.png"
+        
+        fetch -o /tmp/fb14_assets/nasa_4k_wallpaper.jpg https://raw.githubusercontent.com/msartor99/FreeBSD14/ffdccbb160df14397836ce9b3b361c9ab87f97a9/wp8860763-nasa-4k-wallpapers.jpg 2>/dev/null || true
+        
+        if [ -f /tmp/fb14_assets/nasa_4k_wallpaper.jpg ]; then
+            if [ "$DE_CHOICE" -eq 1 ]; then
+                mkdir -p /usr/local/share/wallpapers/NASA_4K/contents/images
+                cp /tmp/fb14_assets/nasa_4k_wallpaper.jpg /usr/local/share/wallpapers/NASA_4K/contents/images/3840x2160.jpg
+                cat > /usr/local/share/wallpapers/NASA_4K/metadata.desktop << 'EOF_KDE'
 [Desktop Entry]
 Name=NASA 4K
 X-KDE-PluginInfo-Name=NASA_4K
 EOF_KDE
-            mkdir -p /usr/share/skel/dot.config
-            printf "[Wallpaper][org.kde.image][General]\nImage=/usr/local/share/wallpapers/NASA_4K\n" > /usr/share/skel/dot.config/kscreenlockerrc
-            if [ -d "/home/$MAIN_USER" ]; then
-                mkdir -p "/home/$MAIN_USER/.config"
-                printf "[Wallpaper][org.kde.image][General]\nImage=/usr/local/share/wallpapers/NASA_4K\n" > "/home/$MAIN_USER/.config/kscreenlockerrc"
-                chown -R "$MAIN_USER:wheel" "/home/$MAIN_USER/.config"
+                mkdir -p /usr/share/skel/dot.config
+                printf "[Wallpaper][org.kde.image][General]\nImage=/usr/local/share/wallpapers/NASA_4K\n" > /usr/share/skel/dot.config/kscreenlockerrc
+                if [ -d "/home/$MAIN_USER" ]; then
+                    mkdir -p "/home/$MAIN_USER/.config"
+                    printf "[Wallpaper][org.kde.image][General]\nImage=/usr/local/share/wallpapers/NASA_4K\n" > "/home/$MAIN_USER/.config/kscreenlockerrc"
+                    chown -R "$MAIN_USER:wheel" "/home/$MAIN_USER/.config"
+                fi
             fi
         fi
+        THEME_NAME="nasa"
     fi
+
+    # Write final SDDM Configuration forcing X11 Mode
+    cat > /usr/local/etc/sddm.conf << EOF
+[General]
+DisplayServer=x11
+
+[Theme]
+Current=${THEME_NAME}
+EOF
 fi
 
 # ==============================================================================
 # 10. METAPACKAGES (Internet, Media, Vbox, etc.)
 # ==============================================================================
 if echo "$APP_CHOICES" | grep -q "INTERNET"; then
-    pkg install -y firefox chromium thunderbird cantarell-fonts droid-fonts-ttf noto-basic nerd-fonts
+    pkg install -y firefox thunderbird cantarell-fonts droid-fonts-ttf noto-basic nerd-fonts
 fi
 
 if echo "$APP_CHOICES" | grep -q "MEDIA"; then
