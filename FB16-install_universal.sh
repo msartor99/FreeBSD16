@@ -2,7 +2,7 @@
 # ==============================================================================
 # IDEMPOTENT INSTALLATION AND CONFIGURATION SCRIPT FOR FREEBSD
 # Target: Universal Desktop Deployment (Workstations & Laptops)
-# Version: 16.0-CURRENT (Fully Idempotent, Nvidia Fix, SDDM X11, POSIX sh)
+# Version: 16.0-CURRENT (Fully Idempotent, Fast PKG, Nvidia & SSH-VT Fix)
 # ==============================================================================
 
 # Check for root privileges
@@ -130,11 +130,11 @@ bsddialog --title "Desktop Environment" \
           "4" "None (Server setup or manual management)" 2> "$MENU_OUT"
 DE_CHOICE=$(cat "$MENU_OUT")
 
-# Optional NASA Theme Menu
+# Optional Theme Menu
 THEME_NASA=1
 if [ "$DE_CHOICE" -ne 4 ]; then
     bsddialog --title "SDDM Theme Customization" \
-              --yesno "Do you want to install and configure the custom NASA SDDM login theme and FreeBSD boot logos?" 10 75
+              --yesno "Do you want to install and configure FreeBSD boot logos and wallpapers?" 10 75
     THEME_NASA=$?
 fi
 
@@ -174,12 +174,15 @@ esac
 
 clear
 echo "=========================================================================="
-echo "🚀 Updating Package repository..."
+echo "🚀 Checking Package repository status..."
 echo "=========================================================================="
 sed -i '' 's/quarterly/latest/g' /etc/pkg/FreeBSD.conf 2>/dev/null || true
-env ASSUME_ALWAYS_YES=YES pkg bootstrap -f
-pkg update -f
-pkg upgrade -y
+
+if ! command -v pkg >/dev/null 2>&1; then
+    env ASSUME_ALWAYS_YES=YES pkg bootstrap
+fi
+
+pkg update
 
 # ==============================================================================
 # 2. USER CREATION
@@ -211,6 +214,7 @@ add_line_if_missing 'net.inet.tcp.soreceive_stream="1"' /boot/loader.conf
 add_line_if_missing 'net.isr.defaultqlimit="2048"' /boot/loader.conf
 add_line_if_missing 'net.link.ifqmaxlen="2048"' /boot/loader.conf
 add_kld_module "cc_htcp"
+add_kld_module "evdev"
 
 # Sysctl Tweaks
 add_line_if_missing "kern.ipc.shm_allow_removed=1" /etc/sysctl.conf
@@ -320,21 +324,28 @@ add path 'msdosfs/*' mode 0660 group operator
 add path 'ext2fs/*' mode 0660 group operator
 add path 'ntfs/*' mode 0660 group operator
 add path 'usb/*' mode 0660 group operator
+add path 'input/*' mode 0660 group operator
 add path 'unlpt*' mode 0660 group cups
 add path 'lpt*' mode 0660 group cups
-add path 'drm/*' mode 0660 group video
+add path 'dri/*' mode 0666
+add path 'dri/card*' mode 0666
+add path 'dri/renderD*' mode 0666
 add path 'video*' mode 0660 group video
+add path 'nvidia*' mode 0666
+add path 'nvidia-modeset*' mode 0666
+add path 'nvidia-uvm*' mode 0666
 add path 'backlight/*' mode 0660 group operator
 EOF
 sysrc devfs_system_ruleset="localrules"
+service devfs restart 2>/dev/null || true
 add_kld_module "fusefs"
 add_kld_module "ext2fs"
 
 # ==============================================================================
-# 8. GRAPHICS & X11
+# 8. GRAPHICS & X11 (With Input Drivers & DRM)
 # ==============================================================================
-echo "🖥️  Installing X.org base, utilities, and GPU drivers..."
-pkg install -y xorg xauth xinit xterm xrdb xsetroot xcursor-themes
+echo "🖥️  Installing X.org base, input drivers, utilities, and GPU drivers..."
+pkg install -y xorg xauth xinit xterm xrdb xsetroot xcursor-themes xf86-input-libinput
 
 case "$GPU_CHOICE" in
     1)
@@ -350,6 +361,7 @@ case "$GPU_CHOICE" in
         pkg install -y "$NV_PKG" "$NV_LINUX_PKG" libc6-shim nvidia-settings nvidia-xconfig
         
         add_kld_module "nvidia-modeset"
+        add_kld_module "nvidia-drm"
         add_line_if_missing 'hw.nvidiadrm.modeset="1"' /boot/loader.conf
         add_line_if_missing 'hw.nvidia.registry.EnableGpuFirmware="1"' /boot/loader.conf
         [ ! -f /etc/X11/xorg.conf ] && [ ! -f /usr/local/etc/X11/xorg.conf ] && nvidia-xconfig --silent
@@ -403,13 +415,19 @@ case "$DE_CHOICE" in
         ;;
 esac
 
-# SDDM Base Configuration (Forcing X11 DisplayServer)
+# SDDM Configuration & User Permissions (Auto-VT Switch Fix for FreeBSD)
 if [ "$DE_CHOICE" -ne 4 ]; then
-    echo "⌨️  Configuring SDDM keyboard layout & display server..."
+    echo "⌨️  Configuring SDDM keyboard layout, video permissions & display server..."
     
+    pw groupmod video -m sddm 2>/dev/null || true
+
     mkdir -p /usr/local/share/sddm/scripts
     cat > /usr/local/share/sddm/scripts/Xsetup << EOF
 #!/bin/sh
+# Force FreeBSD console VT switch to Xorg VT (works via ttyv0 redirection)
+vidcontrol -s 9 < /dev/ttyv0 2>/dev/null || true
+export LANG=${SYS_LANG}
+export LC_ALL=${SYS_LANG}
 if [ -x /usr/local/bin/setxkbmap ]; then
     if [ -n "${KBD_VARIANT}" ]; then
         /usr/local/bin/setxkbmap ${KBD_LAYOUT} ${KBD_VARIANT}
@@ -429,37 +447,10 @@ Use=true
 VariantList=${KBD_VARIANT}
 EOF
     chown -R sddm:sddm /var/db/sddm/.config 2>/dev/null || true
-fi
 
-# SDDM Theme Setup
-if [ "$DE_CHOICE" -ne 4 ]; then
-    THEME_NAME="breeze"
     if [ "$THEME_NASA" -eq 0 ]; then
-        echo "🎨 Applying custom NASA SDDM theme..."
         rm -rf /tmp/fb14_assets
         git clone https://github.com/msartor99/FreeBSD14 /tmp/fb14_assets
-        mkdir -p /usr/local/share/sddm/themes/nasa
-        cp /usr/local/share/sddm/themes/maldives/* /usr/local/share/sddm/themes/nasa/ 2>/dev/null || true
-        cp /tmp/fb14_assets/Main.qml /usr/local/share/sddm/themes/nasa/ 2>/dev/null || true
-        cp /tmp/fb14_assets/metadata.desktop /usr/local/share/sddm/themes/nasa/ 2>/dev/null || true
-        
-        rm -f /usr/local/share/sddm/themes/nasa/background.*
-        rm -f /usr/local/share/sddm/themes/nasa/preview.*
-        
-        cp /tmp/fb14_assets/nasa2560login.jpg /usr/local/share/sddm/themes/nasa/background.jpg 2>/dev/null || true
-        cp /tmp/fb14_assets/nasa2560login.jpg /usr/local/share/sddm/themes/nasa/preview.png 2>/dev/null || true
-        cp /tmp/fb14_assets/nasa2560login.jpg /usr/local/share/sddm/themes/nasa/preview.jpg 2>/dev/null || true
-        
-        if grep -q "^Preview=" /usr/local/share/sddm/themes/nasa/metadata.desktop 2>/dev/null; then
-            sed -i '' 's/^Preview=.*/Preview=preview.png/' /usr/local/share/sddm/themes/nasa/metadata.desktop
-        else
-            echo "Preview=preview.png" >> /usr/local/share/sddm/themes/nasa/metadata.desktop
-        fi
-
-        if [ -f /usr/local/share/sddm/themes/nasa/theme.conf ]; then
-            sed -i '' 's/^background=.*/background=background.jpg/' /usr/local/share/sddm/themes/nasa/theme.conf
-        fi
-
         mkdir -p /boot/images
         cp -r /tmp/fb14_assets/freebsd-brand-rev.png /boot/images/ 2>/dev/null || true
         cp -r /tmp/fb14_assets/freebsd-logo-rev.png  /boot/images/ 2>/dev/null || true
@@ -486,16 +477,14 @@ EOF_KDE
                 fi
             fi
         fi
-        THEME_NAME="nasa"
     fi
 
-    # Write final SDDM Configuration forcing X11 Mode
     cat > /usr/local/etc/sddm.conf << EOF
 [General]
 DisplayServer=x11
 
 [Theme]
-Current=${THEME_NAME}
+Current=breeze
 EOF
 fi
 
