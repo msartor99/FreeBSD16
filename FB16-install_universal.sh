@@ -2,7 +2,7 @@
 # ==============================================================================
 # IDEMPOTENT INSTALLATION AND CONFIGURATION SCRIPT FOR FREEBSD
 # Target: Universal Desktop Deployment (Workstations & Laptops)
-# Version: 16.0-CURRENT (Fully Idempotent, Fast PKG, Nvidia & SSH-VT Fix)
+# Version: 16.0-CURRENT (Fully Idempotent, Nvidia BusID & DRM, VT Auto-Switch)
 # ==============================================================================
 
 # Check for root privileges
@@ -364,7 +364,8 @@ case "$GPU_CHOICE" in
         add_kld_module "nvidia-drm"
         add_line_if_missing 'hw.nvidiadrm.modeset="1"' /boot/loader.conf
         add_line_if_missing 'hw.nvidia.registry.EnableGpuFirmware="1"' /boot/loader.conf
-        [ ! -f /etc/X11/xorg.conf ] && [ ! -f /usr/local/etc/X11/xorg.conf ] && nvidia-xconfig --silent
+        # Ajout du paramètre --add-busid pour forcer le ciblage PCIe
+        [ ! -f /etc/X11/xorg.conf ] && [ ! -f /usr/local/etc/X11/xorg.conf ] && nvidia-xconfig --silent --add-busid
         ;;
     2)
         pkg install -y drm-kmod wayland xwayland
