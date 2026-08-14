@@ -1,5 +1,11 @@
 # FreeBSD16
 
+# GOOD NEWS
+
+The Marvell AQ107 on Lenovo P620 is finally recognzed by the aquantia-atlantic driver on FreeBSD-16.0-CURRENT-amd64-20260804-e004ff15f87e-287922-memstick.img
+
+The configuration appears to be correct.
+
 Here's the new FreeBSD 16 in its current (beta) version. The speed of this distribution is incredible; you can really see the difference compared to FreeBSD 15.1. I've adapted my post-installation script; here's the latest version:
 
 Have fun!
