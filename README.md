@@ -1,5 +1,7 @@
 # FreeBSD16
 
+The boot mode on ZFS does not seem to work
+
 # GOOD NEWS
 
 The AQ107 card in the Lenovo P620 seems to be recognized now by the aquantia-atlantic driver on FreeBSD-16.0-CURRENT-amd64-20260810-e004ff15f87e-287922-memstick.img
