@@ -2,7 +2,7 @@
 
 # --- CONFIGURATION AND VERIFICATION ---
 TITLE="FreeBSD Post-Installation (Idempotent)"
-BACKTITLE="Workstation Configuration by Gemini"
+BACKTITLE="Workstation Configuration"
 
 if ! command -v bsddialog >/dev/null 2>&1; then
     echo "Installing bsddialog..."
@@ -28,12 +28,9 @@ This script deeply modifies your FreeBSD system configuration. \
 It is provided 'as is', without any express or implied warranty. \
 By using it, you agree that the author cannot be held responsible \
 for any data loss, system breakage, or other damage.\n\n\
-ACKNOWLEDGEMENTS\n\n\
-A huge thanks to Kamila (kamila.is) for the alternate splash screen, \
-and to NASA for their public domain images.\n\n\
 Do you accept these conditions to continue?"
 
-    if ! bsddialog --backtitle "$BACKTITLE" --title "Warning & Credits" --yesno "$msg" 19 75; then
+    if ! bsddialog --backtitle "$BACKTITLE" --title "Warning" --yesno "$msg" 15 75; then
         clear
         echo "Installation cancelled by the user. No changes have been made."
         exit 1
@@ -66,7 +63,6 @@ base_config() {
 
     sysrc -f /boot/loader.conf boot_mute=YES splash_changer_enable=YES autoboot_delay=3
     
-    # Idempotent correction: check if the redirect > /dev/null already exists before using sed
     if ! grep -qF 'run_rc_script ${_rc_elem} ${_boot} > /dev/null' /etc/rc; then
         sed -i '' 's/run_rc_script ${_rc_elem} ${_boot}/run_rc_script ${_rc_elem} ${_boot} > \/dev\/null/g' /etc/rc
     fi
@@ -78,7 +74,6 @@ base_config() {
     
     sysctl net.local.stream.recvspace=65536 net.local.stream.sendspace=65536
     
-    # Adding ca_root_nss to fix certificate issues
     pkg install -y doas unzip libzip wget git htop neofetch python3 bashtop ImageMagick7 smartmontools ca_root_nss
     certctl rehash
 
@@ -86,7 +81,7 @@ base_config() {
     [ ! -f /usr/local/etc/smartd.conf ] && cp /usr/local/etc/smartd.conf.sample /usr/local/etc/smartd.conf
     service smartd restart 2>/dev/null || service smartd start
 
-    # --- Localization (French/Swiss defaults kept for system logic) ---
+    # --- Localization (French/Swiss defaults) ---
     if ! grep -q "french|French Users Accounts" /etc/login.conf; then
         cat >> /etc/login.conf <<EOF
 
@@ -103,7 +98,7 @@ EOF
     fi
     echo 'defaultclass=french' > /etc/adduser.conf
     
-    USER_NAME=$(bsddialog --inputbox "Local Configuration:\nEnter main user name:" 9 50 3>&1 1>&2 2>&3)
+    USER_NAME=$(bsddialog --inputbox "Local Configuration:\nEnter main user name (default: administrateur):" 9 50 "administrateur" 3>&1 1>&2 2>&3)
     if [ -n "$USER_NAME" ]; then
         export USER_NAME
         pw usermod "$USER_NAME" -G wheel,operator,video -L french 2>/dev/null || pw useradd "$USER_NAME" -m -G wheel,operator,video -s /bin/sh -c "System Administrator" -L french
@@ -131,7 +126,6 @@ cpu_config() {
 hardware_config() {
     bsddialog --infobox "Installing Hardware Base, Xorg and SDDM..." 5 60
     
-    # 1. Critical elements (X11, Display Manager, DBUS)
     if [ "$FREEBSD_VER" = "16" ]; then
         pkg install -y xorg dbus avahi seatd sddm xf86-input-libinput
         add_kld_module "evdev"
@@ -139,23 +133,39 @@ hardware_config() {
         pkg install -y xorg dbus avahi seatd sddm
     fi
     
-    # 2. Audio
-    pkg install -y pulseaudio pipewire wireplumber freedesktop-sound-theme
+    # Audio - PulseAudio uniquement (pas de PipeWire pour éviter les conflits)
+    pkg install -y pulseaudio freedesktop-sound-theme
     
-    # 3. Printing (CUPS)
     pkg install -y cups gutenprint cups-filters hplip system-config-printer
-    
-    # 4. Filesystems & Tools
     pkg install -y fusefs-ntfs fusefs-hfsfuse signal-cli
     
     sysrc sound_load="YES" snd_hda_load="YES"
+    
+    # Fix Son: Canal DisplayPort par défaut au niveau du noyau
     add_line_if_missing "hw.snd.default_unit=1" /etc/sysctl.conf
     
-    # Enable core graphical services
+    # Fix Son: Création d'un script de démarrage KDE différé pour attacher PulseAudio au dsp1
+    mkdir -p /usr/local/etc/xdg/autostart
+    cat > /usr/local/bin/init-kde-audio.sh <<'EOF'
+#!/bin/sh
+sleep 4
+pulseaudio -k 2>/dev/null
+pulseaudio --start
+pactl load-module module-oss device=/dev/dsp1
+EOF
+    chmod +x /usr/local/bin/init-kde-audio.sh
+
+    cat > /usr/local/etc/xdg/autostart/init-kde-audio.desktop <<EOF
+[Desktop Entry]
+Exec=/usr/local/bin/init-kde-audio.sh
+Name=Initialize KDE Audio
+Type=Application
+OnlyShowIn=KDE;
+EOF
+    
     sysrc dbus_enable=YES avahi_enable=YES seatd_enable=YES sddm_enable=YES sddm_lang="fr_CH.UTF-8"
     sysrc cupsd_enable=YES devfs_system_ruleset=localrules
     
-    # Enable FUSE & ext2fs kernel modules
     add_kld_module "fusefs"
     add_kld_module "ext2fs"
     
@@ -163,7 +173,7 @@ hardware_config() {
     add_line_if_missing "proc /proc procfs rw 0 0" /etc/fstab
     add_line_if_missing "fdesc /dev/fd fdescfs rw 0 0" /etc/fstab
 
-    # --- Devfs Rules Adaptation ---
+    # --- Devfs Rules Adaptation (incluant dsp* et mixer* en 0666) ---
     if [ "$FREEBSD_VER" = "16" ]; then
         cat >/etc/devfs.rules <<EOF
 [localrules=5]
@@ -187,6 +197,8 @@ add path 'video*' mode 0660 group video
 add path 'nvidia*' mode 0666
 add path 'nvidia-modeset*' mode 0666
 add path 'nvidia-uvm*' mode 0666
+add path 'dsp*' mode 0666
+add path 'mixer*' mode 0666
 EOF
     else
         if [ ! -f /etc/devfs.rules ] || ! grep -q "localrules" /etc/devfs.rules; then
@@ -204,7 +216,12 @@ add path 'ntfs/*' mode 0660 group operator
 add path 'usb/*' mode 0660 group operator
 add path 'unlpt*' mode 0660 group cups
 add path 'lpt*' mode 0660 group cups
+add path 'dsp*' mode 0666
+add path 'mixer*' mode 0666
 EOF
+        else
+            add_line_if_missing "add path 'dsp*' mode 0666" /etc/devfs.rules
+            add_line_if_missing "add path 'mixer*' mode 0666" /etc/devfs.rules
         fi
     fi
     service devfs restart 2>/dev/null || true
@@ -229,7 +246,6 @@ Section "InputClass"
 EndSection
 EOF
 
-    # --- SDDM fixes according to version ---
     if [ "$FREEBSD_VER" = "16" ]; then
         mkdir -p /usr/local/share/sddm/scripts
         cat > /usr/local/share/sddm/scripts/Xsetup <<EOF
@@ -289,7 +305,6 @@ nvidia_config() {
         LINUX_LIBS="linux-nvidia-libs-${SUFFIX}"
     fi
 
-    # --- CRITICAL: Linux Compatibility Setup ---
     bsddialog --infobox "Preparing Linux compatibility layer..." 5 60
     
     clean_kld=$(sysrc -n kld_list | sed -E 's/\b(linux64|linux)\b//g' | xargs)
@@ -302,37 +317,32 @@ nvidia_config() {
     pkg install -y linux-rl9
     service linux restart 2>/dev/null || service linux start
 
-    # --- Nvidia Packages Installation ---
     bsddialog --infobox "Installing $DRIVER_PKG and $LINUX_LIBS..." 5 60
     
     if [ "$FREEBSD_VER" = "16" ]; then
-        pkg install -y "$DRIVER_PKG" "$LINUX_LIBS" libc6-shim nvidia-settings nvidia-xconfig
+        pkg install -y "$DRIVER_PKG" "$LINUX_LIBS" libc6-shim nvidia-settings nvidia-drm-kmod
         add_kld_module "nvidia-drm"
+        add_line_if_missing "hw.nvidiadrm.modeset=\"1\"" /boot/loader.conf
         add_line_if_missing "nvidia-drm.modeset=\"1\"" /boot/loader.conf
         pw groupmod video -m sddm 2>/dev/null || true
     else
         pkg install -y "$DRIVER_PKG" "$LINUX_LIBS" libc6-shim nvidia-settings
+        add_line_if_missing "hw.nvidiadrm.modeset=\"1\"" /boot/loader.conf
     fi
     
     add_kld_module "nvidia-modeset"
     sysrc nvidia_modeset_enable="YES"
-    
-    add_line_if_missing "hw.nvidiadrm.modeset=\"1\"" /boot/loader.conf
     add_line_if_missing "hw.nvidia.registry.EnableGpuFirmware=\"1\"" /boot/loader.conf
     
-    # --- Xorg Config ---
     mkdir -p /usr/local/etc/X11/xorg.conf.d/
-    if [ "$FREEBSD_VER" = "16" ]; then
-        [ ! -f /usr/local/etc/X11/xorg.conf ] && nvidia-xconfig --silent --add-busid
-    else
-        cat >/usr/local/etc/X11/xorg.conf.d/driver-nvidia.conf <<EOF
+    cat >/usr/local/etc/X11/xorg.conf.d/driver-nvidia.conf <<EOF
 Section "Device"
-    Identifier     "Card0"
+    Identifier     "NVIDIA Card"
     Driver         "nvidia"
     VendorName     "NVIDIA Corporation"
+    Option         "NoLogo" "true"
 EndSection
 EOF
-    fi
 
     bsddialog --msgbox "Nvidia drivers configured successfully!" 6 60
 }
@@ -373,40 +383,6 @@ plasma_config() {
     pkg install -y -g "plasma6-*" "kf6-*"
     pkg install -y plasma6-discover kf6-knewstuff kf6-purpose qt6-svg qt6-imageformats
     pkg install -y pavucontrol kate konsole ark remmina dolphin Kvantum
-    
-    # --- Integration: Smart Video Wallpaper Reborn ---
-    bsddialog --infobox "Installing Video Wallpaper Support & Plugins..." 5 70
-    
-    # 1. Qt6 Multimedia codecs
-    pkg install -y qt6-multimedia gstreamer1-plugins-all gstreamer1-libav
-    
-    # 2. Deploy animated wallpaper plugin under the strict Plasma 6 ID folder
-    rm -rf /usr/local/share/plasma/wallpapers/com.github.luisbocanegra.smartvideo
-    
-    [ -d /tmp/plasma-video-wp ] && rm -rf /tmp/plasma-video-wp
-    git clone https://github.com/luisbocanegra/plasma-smart-video-wallpaper-reborn.git /tmp/plasma-video-wp
-    
-    mkdir -p /usr/local/share/plasma/wallpapers/luisbocanegra.smart.video.wallpaper.reborn
-    cp -rf /tmp/plasma-video-wp/package/* /usr/local/share/plasma/wallpapers/luisbocanegra.smart.video.wallpaper.reborn/
-    rm -rf /tmp/plasma-video-wp
-
-    # 3. Download demo MP4 directly to the main system wallpapers directory
-    bsddialog --infobox "Downloading demo video file (MP4)..." 5 70
-    mkdir -p /usr/local/share/wallpapers
-    fetch -o /usr/local/share/wallpapers/file_example_MP4.mp4 "https://raw.githubusercontent.com/msartor99/FreeBSD-base/45745e9ee8b15978bd5fd8ffa8383ccd7071e2ee/file_example_MP4_1920_18MG.mp4"
-    chmod 644 /usr/local/share/wallpapers/file_example_MP4.mp4
-
-    # 4. Copy the demo video directly to user's personal Videos & Vidéos directories
-    TARGET_USER="${USER_NAME:-administrateur}"
-    if [ -d "/home/$TARGET_USER" ]; then
-        mkdir -p "/home/$TARGET_USER/Videos"
-        mkdir -p "/home/$TARGET_USER/Vidéos"
-        
-        cp /usr/local/share/wallpapers/file_example_MP4.mp4 "/home/$TARGET_USER/Videos/"
-        cp /usr/local/share/wallpapers/file_example_MP4.mp4 "/home/$TARGET_USER/Vidéos/"
-        
-        chown -R "$TARGET_USER:$TARGET_USER" "/home/$TARGET_USER/Videos" "/home/$TARGET_USER/Vidéos"
-    fi
 }
 
 mate_config() {
@@ -461,118 +437,6 @@ vbox_config() {
     add_line_if_missing 'perm    vboxnetctl 0660' /etc/devfs.conf
 }
 
-kamila_splash() {
-    bsddialog --infobox "Downloading and configuring Kamila splash screen..." 5 70
-    pkg install -y ImageMagick7 wget
-    
-    mkdir -p /boot/images
-    cd /tmp || return
-    wget -qO v2.png https://kamila.is/media/v2.png
-    
-    magick convert v2.png -resize 1920x1080 -define png:color-type=6 /boot/images/splash.png
-    sysrc -f /boot/loader.conf splash="/boot/images/splash.png" shutdown_splash="/boot/images/shutdown_splash.png"
-    
-    bsddialog --msgbox "Kamila Splash Screen configured successfully!" 6 60
-}
-
-nasa_theme() {
-    bsddialog --infobox "Deploying NASA Theme based on native Maldives..." 5 60
-    
-    # 1. Base Assets Download
-    [ -d /tmp/fb14_assets ] && rm -rf /tmp/fb14_assets
-    git clone https://github.com/msartor99/FreeBSD14 /tmp/fb14_assets
-    
-    # 2. Use system's native Maldives theme (Guarantees Qt version compatibility!)
-    rm -rf /usr/local/share/sddm/themes/nasa
-    cp -r /usr/local/share/sddm/themes/maldives /usr/local/share/sddm/themes/nasa
-    
-    # 3. Inject only the background image and metadata, DO NOT overwrite Main.qml
-    cp -f /tmp/fb14_assets/nasa2560login.jpg /usr/local/share/sddm/themes/nasa/background.jpg
-    cp -f /tmp/fb14_assets/metadata.desktop /usr/local/share/sddm/themes/nasa/
-    
-    if [ -f /usr/local/share/sddm/themes/nasa/theme.conf ]; then
-        sed -i '' 's/^background=.*/background=background.jpg/' /usr/local/share/sddm/themes/nasa/theme.conf
-    fi
-
-    # 4. Generate the preview thumbnail
-    pkg install -y ImageMagick7
-    rm -f /usr/local/share/sddm/themes/nasa/maldives.jpg
-    magick convert /tmp/fb14_assets/nasa1920.png -resize 600x338 /usr/local/share/sddm/themes/nasa/preview.png
-    chmod 644 /usr/local/share/sddm/themes/nasa/preview.png
-
-    if [ -f /usr/local/share/sddm/themes/nasa/metadata.desktop ]; then
-        sed -i '' 's/Screenshot=.*/Screenshot=preview.png/g' /usr/local/share/sddm/themes/nasa/metadata.desktop
-        sed -i '' 's/Name=.*/Name=NASA/g' /usr/local/share/sddm/themes/nasa/metadata.desktop
-    fi
-
-    # 5. Apply SDDM Theme Configuration
-    if [ "$FREEBSD_VER" = "16" ]; then
-        cat > /usr/local/etc/sddm.conf <<EOF
-[General]
-DisplayServer=x11
-GreeterEnvironment=QT_QUICK_BACKEND=software,LANG=fr_CH.UTF-8,LC_ALL=fr_CH.UTF-8
-
-[X11]
-MinimumVT=7
-
-[Theme]
-Current=nasa
-EOF
-    else
-        cat > /usr/local/etc/sddm.conf <<EOF
-[Theme]
-Current=nasa
-EOF
-    fi
-    
-    # 6. Boot Splash Images
-    mkdir -p /boot/images
-    cp -f /tmp/fb14_assets/freebsd-brand-rev.png /boot/images/freebsd-brand-rev.png
-    cp -f /tmp/fb14_assets/freebsd-logo-rev.png /boot/images/freebsd-logo-rev.png
-    
-    magick convert /tmp/fb14_assets/nasa1920.png -define png:color-type=6 /boot/images/splash.png
-    magick convert /tmp/fb14_assets/nasa1920.png -resize 1920x1080 -define png:color-type=6 /boot/images/shutdown_splash.png
-    
-    # Clear QML and thumbnail caches
-    for u in root administrateur; do
-        if [ -d "/home/$u" ]; then
-            rm -rf "/home/$u/.cache/thumbnails/"
-            rm -rf "/home/$u/.cache/qmlcache/"
-        elif [ "$u" = "root" ]; then
-            rm -rf "/root/.cache/thumbnails/"
-            rm -rf "/root/.cache/qmlcache/"
-        fi
-    done
-
-    sysrc -f /boot/loader.conf splash="/boot/images/splash.png" shutdown_splash="/boot/images/shutdown_splash.png"
-
-    # --- 7. Plasma 6 Wallpaper ---
-    bsddialog --infobox "Downloading NASA 4K wallpaper for Plasma..." 5 70
-    mkdir -p /usr/local/share/wallpapers
-    
-    fetch -o /usr/local/share/wallpapers/nasa-4k-wallpaper.jpg "https://raw.githubusercontent.com/msartor99/FreeBSD14/ffdccbb160df14397836ce9b3b361c9ab87f97a9/wp8860763-nasa-4k-wallpapers.jpg"
-    chmod 644 /usr/local/share/wallpapers/nasa-4k-wallpaper.jpg
-
-    mkdir -p /usr/local/etc/xdg/autostart
-    cat > /usr/local/bin/apply-nasa-wallpaper.sh <<'EOF'
-#!/bin/sh
-if [ ! -f "$HOME/.nasa_wallpaper_applied" ]; then
-    sleep 4
-    plasma-apply-wallpaperimage /usr/local/share/wallpapers/nasa-4k-wallpaper.jpg
-    touch "$HOME/.nasa_wallpaper_applied"
-fi
-EOF
-    chmod +x /usr/local/bin/apply-nasa-wallpaper.sh
-
-    cat > /usr/local/etc/xdg/autostart/nasa-wallpaper.desktop <<EOF
-[Desktop Entry]
-Exec=/usr/local/bin/apply-nasa-wallpaper.sh
-Name=Apply NASA Wallpaper
-Type=Application
-OnlyShowIn=KDE;
-EOF
-}
-
 apps_config() {
     bsddialog --infobox "Installing applications and system fonts..." 5 50
     if [ "$FREEBSD_VER" = "16" ]; then
@@ -591,7 +455,6 @@ switch_latest() {
 }
 
 vnc_config() {
-    # 1. Dynamically find user
     if [ -z "$USER_NAME" ]; then
         VNC_USER=$(bsddialog --title "X11VNC Configuration" --inputbox "No user configured. Enter the system user for VNC access:" 8 65 "administrateur" 3>&1 1>&2 2>&3)
         [ -z "$VNC_USER" ] && return
@@ -599,21 +462,18 @@ vnc_config() {
         VNC_USER="$USER_NAME"
     fi
     
-    # 2. Get VNC Password
     VNC_PASS=$(bsddialog --title "X11VNC Configuration" --insecure --passwordbox "Define a secure VNC access password for user '$VNC_USER':" 8 65 3>&1 1>&2 2>&3)
     [ -z "$VNC_PASS" ] && return
 
     bsddialog --infobox "Installing and configuring x11vnc..." 5 50
     pkg install -y x11vnc
 
-    # 3. Create crypted VNC password file
     mkdir -p "/home/$VNC_USER/.vnc"
     x11vnc -storepasswd "$VNC_PASS" "/home/$VNC_USER/.vnc/passwd" > /dev/null 2>&1
     
     chown -R "$VNC_USER:$VNC_USER" "/home/$VNC_USER/.vnc"
     chmod 600 "/home/$VNC_USER/.vnc/passwd"
 
-    # 4. Generate system daemon rc.d script
     cat > /usr/local/etc/rc.d/x11vnc <<EOF
 #!/bin/sh
 #
@@ -628,22 +488,17 @@ rcvar="x11vnc_enable"
 
 load_rc_config \$name
 
-# Default values
 : \${x11vnc_enable:="NO"}
 
-# 1. Force path to include /usr/local/bin (required to locate xauth)
 export PATH="/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin"
 
 procname="/usr/local/bin/x11vnc"
 command="/usr/sbin/daemon"
 pidfile="/var/run/\${name}.pid"
 
-# 2. Dynamic SDDM authority file detection on start
 x11vnc_precmd() {
-    # Extract authority file from running Xorg process
     XAUTH=\$(ps -wwaux | grep -E '/Xorg' | grep -v grep | sed -n 's/.*-auth \([^ ]*\).*/\1/p' | head -n 1)
     
-    # If not yet fully indexed, fallback to matching SDDM run directories
     if [ -z "\$XAUTH" ]; then
         XAUTH=\$(ls /var/run/sddm/xauth_* 2>/dev/null | head -n 1)
     fi
@@ -651,7 +506,6 @@ x11vnc_precmd() {
     if [ -n "\$XAUTH" ]; then
         command_args="-f -p \${pidfile} \${procname} -display :0 -rfbport 5900 -rfbauth /home/$VNC_USER/.vnc/passwd -auth \$XAUTH -forever -shared -loop"
     else
-        # Fallback to general guess if no active session authority can be captured
         command_args="-f -p \${pidfile} \${procname} -display :0 -rfbport 5900 -rfbauth /home/$VNC_USER/.vnc/passwd -auth guess -forever -shared -loop"
     fi
 }
@@ -672,24 +526,19 @@ EOF
 iphone_config() {
     bsddialog --infobox "Installing iPhone connectivity tools (usbmuxd, libimobiledevice, ifuse)..." 5 75
     
-    # 1. Install native Apple communication packages & FUSE layers
     pkg install -y usbmuxd libimobiledevice ifuse
 
-    # 2. Configure and start usbmuxd background service
     sysrc usbmuxd_enable="YES"
     service usbmuxd restart 2>/dev/null || service usbmuxd start
 
-    # 3. FUSE Security and user-mounting setup
     add_kld_module "fusefs"
     kldload -n fusefs 2>/dev/null
 
     add_line_if_missing "vfs.usermount=1" /etc/sysctl.conf
     sysctl vfs.usermount=1 2>/dev/null
 
-    # 4. Fetch destination user (fallback to administrateur)
     IPHONE_USER="${USER_NAME:-administrateur}"
 
-    # Create user desktop directories for direct sync access
     if [ -d "/home/$IPHONE_USER" ]; then
         mkdir -p "/home/$IPHONE_USER/Desktop/iPhone_Photos"
         mkdir -p "/home/$IPHONE_USER/Desktop/iPhone_Music_VLC"
@@ -697,11 +546,8 @@ iphone_config() {
         chown -R "$IPHONE_USER:$IPHONE_USER" "/home/$IPHONE_USER/Desktop/iPhone_Music_VLC"
     fi
 
-    # 5. Create automated system-wide wrapper script 'iphone-sync'
     cat > /usr/local/bin/iphone-sync <<EOF
 #!/bin/sh
-# Easy FreeBSD utility to mount and sync iPhone media
-
 USER_HOME="/home/$IPHONE_USER"
 PHOTO_DIR="\$USER_HOME/Desktop/iPhone_Photos"
 VLC_DIR="\$USER_HOME/Desktop/iPhone_Music_VLC"
@@ -711,13 +557,9 @@ case "\$1" in
         echo "Attempting to mount iPhone..."
         umount "\$PHOTO_DIR" 2>/dev/null
         umount "\$VLC_DIR" 2>/dev/null
-        
-        # Global mount (DCIM / Photos folder)
         ifuse "\$PHOTO_DIR" && echo "-> Photos mounted to \$PHOTO_DIR"
-        
-        # App-specific mount (VLC App)
         ifuse --documents org.videolan.vlc-ios "\$VLC_DIR" 2>/dev/null && echo "-> VLC App detected and mounted to \$VLC_DIR"
-        echo "\n[Success] Open Dolphin to manage your files. Don't forget to tap 'Trust' on your iPhone screen!"
+        echo "\n[Success] Don't forget to tap 'Trust' on your iPhone screen!"
         ;;
     unmount|umount)
         echo "Safely unmounting iPhone..."
@@ -730,35 +572,16 @@ case "\$1" in
         ;;
     *)
         echo "Usage: iphone-sync [mount | umount | apps]"
-        echo "  mount  : Mounts photos and the VLC app folder to your Desktop"
-        echo "  umount : Safely unmounts the device"
-        echo "  apps   : Lists compatible iOS apps available for file transfer"
         ;;
 esac
 EOF
 
     chmod +x /usr/local/bin/iphone-sync
 
-    # --- FINAL DETAILED SYNC INSTRUCTIONS (ENGLISH) ---
     local tuto_msg="iPhone configuration completed successfully! 🍏\n\n\
-=== MUSIC & PHOTO SYNC GUIDE ===\n\n\
-1. PREPARATION (On your iPhone):\n\
-   - Install the free app \"VLC media player\" from the App Store.\n\
-   - Open the app at least once to initialize its folder structure.\n\n\
-2. CONNECTION:\n\
-   - Plug your iPhone into the USB port.\n\
-   - Unlock your iPhone and tap \"Trust this computer\" when prompted.\n\n\
-3. MOUNTING (On FreeBSD):\n\
-   - Open a terminal (Konsole) and run the command: iphone-sync mount\n\n\
-4. TRANSFERRING MUSIC & PHOTOS:\n\
-   - Go to your Desktop and open the \"iPhone_Music_VLC\" folder.\n\
-   - Simply drag and drop your MP3/FLAC files directly into this folder!\n\
-   - Photos/Videos can be copied out of the \"iPhone_Photos\" folder.\n\n\
-5. SAFE REMOVAL:\n\
-   - When finished, go back to the terminal and run: iphone-sync umount\n\
-   - Unplug your iPhone. Your music is now ready to play in the VLC app!"
-
-    bsddialog --title "iPhone Sync Tutorial" --msgbox "$tuto_msg" 24 85
+Run 'iphone-sync mount' in your terminal to mount the iPhone to your Desktop.\n\
+Ensure VLC is installed on your iOS device for media sync."
+    bsddialog --title "iPhone Sync" --msgbox "$tuto_msg" 10 70
 }
 
 # --- SCRIPT START ---
@@ -769,7 +592,7 @@ choose_version
 # --- MAIN MENU ---
 while true; do
     MAIN_CHOICE=$(bsddialog --backtitle "$BACKTITLE" --title "$TITLE" \
-        --menu "Post-Installation Menu [Target: FreeBSD $FREEBSD_VER]:" 26 85 17 \
+        --menu "Post-Installation Menu [Target: FreeBSD $FREEBSD_VER]:" 24 85 15 \
         "1" "Base Config & Locales (SSH, Boot, Linux, User)" \
         "2" "CPU Management (Intel/AMD)" \
         "3" "Hardware Base (Audio, Xorg, CUPS)" \
@@ -781,12 +604,10 @@ while true; do
         "9" "Samba Server" \
         "10" "XRDP Remote Desktop" \
         "11" "VirtualBox" \
-        "12" "Kamila Splash Screen" \
-        "13" "NASA Theme" \
-        "14" "Applications & Fonts" \
-        "15" "Upgrade to LATEST Branch" \
-        "16" "X11VNC Server (Fast Connection)" \
-        "17" "iPhone Connect Support (VLC & Photos)" \
+        "12" "Applications & Fonts" \
+        "13" "Upgrade to LATEST Branch" \
+        "14" "X11VNC Server (Fast Connection)" \
+        "15" "iPhone Connect Support (VLC & Photos)" \
         "Q" "Quit" 3>&1 1>&2 2>&3)
 
     case $MAIN_CHOICE in
@@ -801,12 +622,10 @@ while true; do
         9) samba_config ;;
         10) xrdp_config ;;
         11) vbox_config ;;
-        12) kamila_splash ;;
-        13) nasa_theme ;;
-        14) apps_config ;;
-        15) switch_latest ;;
-        16) vnc_config ;;
-        17) iphone_config ;;
+        12) apps_config ;;
+        13) switch_latest ;;
+        14) vnc_config ;;
+        15) iphone_config ;;
         Q|q|*) break ;;
     esac
 done
