@@ -1,6 +1,6 @@
 # FreeBSD16
 
-The boot mode on ZFS does not seem to work
+The boot mode on ZFS double M2 NVMe does not seem to work but UFS work.
 
 # GOOD NEWS
 
