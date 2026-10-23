@@ -6,7 +6,7 @@ The boot mode on ZFS double M2 NVMe does not seem to work but UFS work.
 
 using Gemini 4 to create a new installation script
 
-freebsd_16_workstation_setup_v0_8.sh
+freebsd_16_workstation_setup_vx.x.sh
 
 
 # GOOD NEWS
