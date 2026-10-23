@@ -2,6 +2,13 @@
 
 The boot mode on ZFS double M2 NVMe does not seem to work but UFS work.
 
+# NEW VERSION
+
+using Gemini 4 to create a new installation script
+
+freebsd_16_workstation_setup_v0_8.sh
+
+
 # GOOD NEWS
 
 The AQ107 card in the Lenovo P620 seems to be recognized now by the aquantia-atlantic driver on FreeBSD-16.0-CURRENT-amd64-20260810-e004ff15f87e-287922-memstick.img
